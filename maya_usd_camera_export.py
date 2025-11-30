@@ -1,13 +1,23 @@
-# -*- coding: utf-8 -*-
 """
 Export a Maya camera to .usdc with baked animation.
-ZERO transform edits:
-- No axis flips
-- No up-axis metadata changes
-- No unit metadata
-- No scale normalization
-Just write Maya's worldMatrix directly each frame.
 Tested in Maya 2025.3 (Python 3).
+
+USAGE
+-----
+1) Paste this file into:  maya_usd_camera_export.py
+2) In Maya, open Script Editor (Python), paste:
+       import maya_usd_camera_export as m
+       m.exportCameraUSDC_ui()
+   …or just run this file directly to auto-open the UI.
+
+NOTES
+-----
+• Aperture/offset attributes in Maya are in INCHES. USD expects MILLIMETERS.
+  We convert only those optical attributes to mm (industry standard in USD).
+• We do not set stage up-axis or linear units; Unreal’s USD importer handles
+  its own axis/unit interpretation. This matches your “manual import” path.
+• TimeCodesPerSecond is set from Maya’s current time unit to keep frames aligned
+  1:1 with your timeline (e.g., 24fps, 30fps, etc.).
 """
 
 import os
@@ -20,12 +30,32 @@ from pxr import Usd, UsdGeom, Sdf, Gf
 # Utilities
 # -------------------------
 
+<<<<<<< Updated upstream
 # TODO: this is wrong I think
 def _inches_to_mm(x):  # Maya film gate units are inches
+=======
+def _inches_to_mm(x):
+    """
+    Convert inches to millimeters.
+
+    Maya camera film gate + offsets are authored in inches.
+    USD (UsdGeom.Camera) expects millimeters for aperture-related fields.
+    """
+>>>>>>> Stashed changes
     return float(x) * 25.4
 
 def _maya_fps():
-    """Map Maya time unit to numeric FPS."""
+    """
+    Return the numeric FPS for the current Maya time unit.
+
+    Maya time unit can be symbolic (e.g. "film", "pal", "ntsc", "show", etc.)
+    or explicit strings like "23.976fps". We normalize both to float FPS.
+
+    Returns
+    -------
+    float
+        Frames per second (e.g. 24.0, 30.0, 23.976).
+    """
     unit = cmds.currentUnit(q=True, time=True)
     table = {
         "film": 24.0, "pal": 25.0, "ntsc": 30.0, "show": 48.0,
@@ -42,7 +72,24 @@ def _maya_fps():
     return 24.0
 
 def _resolve_camera(name):
-    """Return (transform, shape) long paths for a valid camera."""
+    """
+    Resolve a camera selection to (transform, shape) long DAG paths.
+
+    Parameters
+    ----------
+    name : str
+        Camera transform OR camera shape path/name.
+
+    Returns
+    -------
+    (str, str)
+        Tuple of (camera_transform_long_path, camera_shape_long_path)
+
+    Raises
+    ------
+    RuntimeError
+        If the node doesn't exist or isn't a valid camera selection.
+    """
     if not name or not cmds.objExists(name):
         raise RuntimeError("Camera does not exist: %s" % name)
     if cmds.nodeType(name) == "camera":
@@ -73,11 +120,40 @@ def _cam_attrs_mm(shape):
     }
 
 # -------------------------
-# Core export (no transform edits)
+# Core export 
 # -------------------------
 
 def export_camera_usdc(path, start, end, step, camera):
-    """Bake camera animation to .usdc, writing Maya worldMatrix verbatim."""
+    """
+    Bake the selected Maya camera into a binary .usdc file.
+
+    We author the camera's world transform verbatim per frame (no flips or conversions),
+    and set optical attributes (aperture/offsets in mm). This mirrors the behavior you
+    expect when manually importing into Unreal via the USD importer.
+
+    Parameters
+    ----------
+    path : str
+        Output file path. Must end with ".usdc".
+    start : int
+        Start frame (inclusive).
+    end : int
+        End frame (inclusive).
+    step : int
+        Frame step (e.g., 1 to key every frame, 2 to key every other frame).
+    camera : str
+        Camera transform or shape to export.
+
+    Returns
+    -------
+    str
+        The output .usdc path.
+
+    Raises
+    ------
+    RuntimeError
+        If validation fails (bad frame range, missing camera, wrong extension, etc.).
+    """
     if not path or not path.lower().endswith(".usdc"):
         raise RuntimeError("Export file must end with .usdc")
 
