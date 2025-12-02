@@ -195,8 +195,11 @@ maya/scripts/
 
 ## Tested Platforms
 
-- Maya 2025.3, Maya 2026
-- Unreal Engine 5.3, 5.4 (Python 3.9+, USD Importer plugin)
-- Windows 10/11
+- Maya 2025.3
+- Unreal Engine 5.6
+- Windows 11
 
 ---
+
+## Credits
+- Button icon from Lucide library

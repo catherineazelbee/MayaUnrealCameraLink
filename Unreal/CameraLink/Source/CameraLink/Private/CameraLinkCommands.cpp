@@ -6,7 +6,7 @@
 
 void FCameraLinkCommands::RegisterCommands()
 {
-	UI_COMMAND(PluginAction, "CameraLink", "Execute CameraLink action", EUserInterfaceActionType::Button, FInputChord());
+	UI_COMMAND(PluginAction, "CameraLink", "Import USDA Camera", EUserInterfaceActionType::Button, FInputChord());
 }
 
 #undef LOCTEXT_NAMESPACE

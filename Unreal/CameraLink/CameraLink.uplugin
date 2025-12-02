@@ -20,5 +20,9 @@
 			"Type": "Editor",
 			"LoadingPhase": "Default"
 		}
-	]
+	],
+	"Plugins": [
+   	 { "Name": "USDImporter", "Enabled": true },
+   	 { "Name": "USDCore",     "Enabled": true }
+  	]
 }

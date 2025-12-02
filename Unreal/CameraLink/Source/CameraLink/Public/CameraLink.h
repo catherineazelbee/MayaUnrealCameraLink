@@ -15,12 +15,15 @@ public:
 	virtual void StartupModule() override;
 	virtual void ShutdownModule() override;
 	
-	/** This function will be bound to Command. */
+	/** Called when toolbar button is clicked - opens file dialog */
 	void PluginButtonClicked();
 	
 private:
 
 	void RegisterMenus();
+
+	/** Execute Python import script with the given USD file path */
+	void ExecutePythonImport(const FString& FilePath);
 
 
 private:
