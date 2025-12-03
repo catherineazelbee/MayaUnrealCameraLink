@@ -10,6 +10,7 @@
 #include "Framework/Application/SlateApplication.h"
 #include "IPythonScriptPlugin.h"
 #include "Modules/ModuleManager.h"
+#include "Interfaces/IPluginManager.h"
 
 static const FName CameraLinkTabName("CameraLink");
 
@@ -30,6 +31,22 @@ void FCameraLinkModule::StartupModule()
 		FCanExecuteAction());
 
 	UToolMenus::RegisterStartupCallback(FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FCameraLinkModule::RegisterMenus));
+
+	// Add plugin Python path
+    FString PluginDir = IPluginManager::Get().FindPlugin("CameraLink")->GetBaseDir();
+    FString PythonPath = PluginDir / TEXT("Content/Python");
+
+    PythonPath = PythonPath.Replace(TEXT("\\"), TEXT("/")); // Normalize
+
+    FString AddPathCommand = FString::Printf(
+        TEXT("import sys; sys.path.append(r\"%s\")"),
+        *PythonPath
+    );
+
+    if (IPythonScriptPlugin* PythonPlugin = FModuleManager::GetModulePtr<IPythonScriptPlugin>("PythonScriptPlugin"))
+    {
+        PythonPlugin->ExecPythonCommand(*AddPathCommand);
+    }
 }
 
 void FCameraLinkModule::ShutdownModule()
@@ -52,7 +69,14 @@ void FCameraLinkModule::PluginButtonClicked()
 	}
 
 	// Get parent window handle
-	const void* ParentWindowHandle = FSlateApplication::Get().GetActiveTopLevelWindow()->GetNativeWindow()->GetOSWindowHandle();
+	TSharedPtr<SWindow> ParentWindow = FSlateApplication::Get().GetActiveTopLevelWindow();
+	const void* ParentWindowHandle = nullptr;
+
+	if (ParentWindow.IsValid() && ParentWindow->GetNativeWindow().IsValid())
+	{
+		ParentWindowHandle = ParentWindow->GetNativeWindow()->GetOSWindowHandle();
+	}
+
 
 	// Open file dialog
 	TArray<FString> OutFiles;
@@ -105,7 +129,7 @@ void FCameraLinkModule::ExecutePythonImport(const FString& FilePath)
 	{
 		FMessageDialog::Open(EAppMsgType::Ok,
 			FText::Format(
-				LOCTEXT("PythonError", "Failed to execute Python import.\n\nMake sure 'unreal_usd_camera_import.py' is in your project's Content/Python folder.\n\nFile: {0}"),
+				LOCTEXT("PythonError", "Failed to execute Python import.\n\nMake sure 'unreal_usd_camera_import.py' is in your plugin's Content/Python folder.\n\nFile: {0}"),
 				FText::FromString(FilePath)
 			));
 	}

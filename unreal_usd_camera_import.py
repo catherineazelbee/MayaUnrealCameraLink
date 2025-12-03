@@ -1,15 +1,6 @@
 """
 Unreal USD Camera Importer
 Imports a USD camera with animation into Unreal Engine and creates a Level Sequence.
-
-Based on working LayoutLink import pattern.
-
-USAGE
------
-1) Place this file in your project's Content/Python folder
-2) In Unreal's Python console:
-       import unreal_usd_camera_import
-       unreal_usd_camera_import.import_camera()
 """
 
 import os

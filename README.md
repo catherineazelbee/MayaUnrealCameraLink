@@ -96,11 +96,11 @@ A streamlined pipeline for transferring animated cameras from Maya to Unreal Eng
 
 ## Updating Camera Animation (Live Reload)
 
-One of the best features of this USD workflow is **live reloading**. You don't need to re-import when you make changes in Maya!
+One of the best features of this USD workflow is **live reloading**. You don't need to re-import when you make changes in Maya.
 
 ### To update your camera animation:
 
-1. **In Maya:** Make your animation changes and re-export to the **same file path**.
+1. **In Maya:** Make your animation changes and re-export to the **same file path** with the export button.
 
 2. **In Unreal:** 
    - Open the **USD Stage Editor** (Window → USD Stage)
@@ -137,10 +137,7 @@ This prints:
 
 | Problem | Solution |
 |---------|----------|
-| Camera imports but doesn't animate | Verify camera has keyframes in Maya (check Graph Editor) |
-| Wrong frame range in Sequencer | Check Maya timeline range before export |
-| Camera position is wrong | Ensure you're exporting world-space transforms |
-| No Level Sequence created | Check that USD file has time samples (use debug function) |
+| Working with USD Stage setup | Add the imported camera root as an actor to the main sequence, set the Time to the start and end of your desired frame range|
 
 ---
 
@@ -155,7 +152,7 @@ YourProject/
         │   └── Python/
         │       └── unreal_usd_camera_import.py
         ├── Resources/
-        │   └── Icon20.png
+        │   └── ...
         └── Source/
             └── CameraLink/
                 └── ...
