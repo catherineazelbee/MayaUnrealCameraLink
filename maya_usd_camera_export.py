@@ -1,540 +1,355 @@
-"""
-Export a Maya camera to .usda with baked animation.
-Tested in Maya 2025.3 (Python 3).
-
-USAGE
------
-1) Place this file in your Maya scripts folder
-2) In Maya Script Editor (Python):
-       import maya_usd_camera_export
-       maya_usd_camera_export.show_ui()
-"""
-
-import os
-import maya.cmds as cmds
-import maya.api.OpenMaya as om
-from pxr import Usd, UsdGeom, Sdf, Gf
-
-# Qt imports with fallback
-try:
-    from PySide6 import QtWidgets, QtCore, QtGui
-    from shiboken6 import wrapInstance
-except ImportError:
-    from PySide2 import QtWidgets, QtCore, QtGui
-    from shiboken2 import wrapInstance
-
+import maya.cmds as mc
+import maya.mel as mel
+from PySide6 import QtWidgets, QtCore, QtGui
+from shiboken6 import wrapInstance
 import maya.OpenMayaUI as omui
-from maya.app.general.mayaMixin import MayaQWidgetDockableMixin
+import os
 
+try:
+    from pxr import Usd, UsdGeom, Sdf, Gf
+except ImportError:
+    mc.error("USD Python libraries not found. Make sure Maya USD plugin is loaded.")
 
-# =============================================================================
-# Utilities
-# =============================================================================
+def get_maya_main_window():
+    """Get Maya main window as a Qt widget."""
+    main_window_ptr = omui.MQtUtil.mainWindow()
+    return wrapInstance(int(main_window_ptr), QtWidgets.QWidget)
 
-def _inches_to_mm(val):
-    """Convert inches to millimeters (USD expects mm for aperture)."""
-    return float(val) * 25.4
-
-
-def _get_maya_fps():
-    """Get Maya's current FPS as a float."""
-    time_unit = cmds.currentUnit(query=True, time=True)
+def export_camera_to_usd(camera_name, output_path, frame_range):
+    """Export camera animation to USD with proper time metadata."""
+    start_frame, end_frame = frame_range
     
+    # Get Maya's current frame rate
+    time_unit = mc.currentUnit(query=True, time=True)
     fps_map = {
-        "game": 15.0,
-        "film": 24.0,
-        "pal": 25.0,
-        "ntsc": 30.0,
-        "show": 48.0,
-        "palf": 50.0,
-        "ntscf": 60.0,
-        "23.976fps": 23.976,
-        "29.97fps": 29.97,
-        "29.97df": 29.97,
-        "47.952fps": 47.952,
-        "59.94fps": 59.94,
+        'game': 15.0, 'film': 24.0, 'pal': 25.0, 'ntsc': 30.0,
+        'show': 48.0, 'palf': 50.0, 'ntscf': 60.0,
+        '23.976fps': 23.976, '29.97fps': 29.97, '29.97df': 29.97,
+        '47.952fps': 47.952, '59.94fps': 59.94, '44100fps': 44100.0,
+        '48000fps': 48000.0
     }
+    maya_fps = fps_map.get(time_unit, 24.0)
     
-    if time_unit in fps_map:
-        return fps_map[time_unit]
+    # Ensure .usda extension (ASCII format)
+    if not output_path.endswith('.usda'):
+        output_path = output_path.rsplit('.', 1)[0] + '.usda'
     
-    if time_unit.endswith("fps"):
-        try:
-            return float(time_unit[:-3])
-        except ValueError:
-            pass
+    # Create USD stage in ASCII format
+    stage = Usd.Stage.CreateNew(output_path)
     
-    return 24.0
-
-
-def _resolve_camera(name):
-    """Resolve camera name to (transform_path, shape_path)."""
-    if not name or not cmds.objExists(name):
-        raise RuntimeError(f"Camera does not exist: {name}")
-    
-    node_type = cmds.nodeType(name)
-    
-    if node_type == "camera":
-        shape = cmds.ls(name, long=True)[0]
-        parents = cmds.listRelatives(shape, parent=True, fullPath=True)
-        if not parents:
-            raise RuntimeError(f"Camera shape has no parent: {shape}")
-        xform = parents[0]
-    else:
-        xform = cmds.ls(name, long=True)[0]
-        shapes = cmds.listRelatives(xform, shapes=True, type="camera", fullPath=True)
-        if not shapes:
-            raise RuntimeError(f"No camera shape found under: {name}")
-        shape = shapes[0]
-    
-    return xform, shape
-
-
-def _sanitize_name(name):
-    """Clean up name for USD prim path."""
-    clean = name.split("|")[-1].split(":")[-1]
-    for char in '<>:"/\\|?*. ':
-        clean = clean.replace(char, "_")
-    return clean
-
-
-def _is_animated(obj):
-    """Check if object has animation (keyframes or constraints)."""
-    animatable_attrs = [
-        "translateX", "translateY", "translateZ",
-        "rotateX", "rotateY", "rotateZ",
-        "scaleX", "scaleY", "scaleZ"
-    ]
-    
-    for attr in animatable_attrs:
-        full_attr = f"{obj}.{attr}"
-        if cmds.objExists(full_attr):
-            connections = cmds.listConnections(full_attr, type="animCurve") or []
-            if connections:
-                return True
-            constraints = cmds.listConnections(full_attr, type="constraint") or []
-            if constraints:
-                return True
-    
-    return False
-
-
-def _is_camera_animated(shape):
-    """Check if camera optical attributes are animated."""
-    camera_attrs = ["focalLength", "horizontalFilmAperture", "verticalFilmAperture",
-                    "horizontalFilmOffset", "verticalFilmOffset", 
-                    "nearClipPlane", "farClipPlane"]
-    
-    for attr in camera_attrs:
-        full_attr = f"{shape}.{attr}"
-        if cmds.objExists(full_attr):
-            connections = cmds.listConnections(full_attr, type="animCurve") or []
-            if connections:
-                return True
-    
-    return False
-
-
-# =============================================================================
-# Core Export
-# =============================================================================
-
-def export_camera_usda(file_path, start_frame, end_frame, step, camera):
-    """Export Maya camera to USD with baked animation."""
-    
-    if not file_path.lower().endswith((".usda", ".usd")):
-        raise RuntimeError("Export file must have .usda or .usd extension")
-    
-    out_dir = os.path.dirname(os.path.abspath(file_path))
-    if out_dir and not os.path.exists(out_dir):
-        os.makedirs(out_dir)
-    
-    if end_frame < start_frame:
-        raise RuntimeError("End frame must be >= start frame")
-    if step <= 0:
-        raise RuntimeError("Step must be > 0")
-    
-    cam_xform, cam_shape = _resolve_camera(camera)
-    cam_name = _sanitize_name(cam_xform)
-    fps = _get_maya_fps()
-    
-    print(f"Exporting camera: {cam_xform}")
-    print(f"  Frame range: {start_frame} - {end_frame} (step {step})")
-    print(f"  FPS: {fps}")
-    
-    xform_animated = _is_animated(cam_xform)
-    optics_animated = _is_camera_animated(cam_shape)
-    
-    print(f"  Transform animated: {xform_animated}")
-    print(f"  Optics animated: {optics_animated}")
-    
-    abs_path = os.path.abspath(file_path)
-    if os.path.exists(abs_path):
-        os.remove(abs_path)
-    
-    stage = Usd.Stage.CreateNew(abs_path)
-    
-    UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
-    UsdGeom.SetStageMetersPerUnit(stage, 0.01)
-    stage.SetTimeCodesPerSecond(fps)
+    # CRITICAL: Set time/FPS metadata for proper Unreal import
+    stage.SetTimeCodesPerSecond(maya_fps)
+    stage.SetFramesPerSecond(maya_fps)
     stage.SetStartTimeCode(start_frame)
     stage.SetEndTimeCode(end_frame)
     
-    prim_path = f"/{cam_name}"
-    usd_camera = UsdGeom.Camera.Define(stage, prim_path)
-    camera_prim = usd_camera.GetPrim()
-    stage.SetDefaultPrim(camera_prim)
+    # Set scene metadata
+    UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
+    UsdGeom.SetStageMetersPerUnit(stage, 0.01)
     
-    xformable = UsdGeom.Xformable(usd_camera)
-    xformable.ClearXformOpOrder()
+    # Create camera prim
+    camera_path = f"/cameras/{camera_name}"
+    camera_prim = UsdGeom.Camera.Define(stage, camera_path)
     
-    translate_op = xformable.AddTranslateOp()
-    rotate_op = xformable.AddRotateXYZOp()
-    scale_op = xformable.AddScaleOp()
+    # Store transform samples and attribute samples
+    xform_samples = {}
+    attr_samples = {
+        'focalLength': {},
+        'horizontalAperture': {},
+        'verticalAperture': {},
+        'focusDistance': {},
+        'fStop': {}
+    }
     
-    original_time = cmds.currentTime(query=True)
-    
-    try:
-        frame_count = int((end_frame - start_frame) / step) + 1
+    # Sample at every frame
+    for frame in range(int(start_frame), int(end_frame) + 1):
+        mc.currentTime(frame)
+        time_code = Usd.TimeCode(frame)
         
-        for i in range(frame_count):
-            frame = start_frame + (i * step)
-            time_code = Usd.TimeCode(frame)
-            
-            cmds.currentTime(frame, edit=True)
-            
-            translation = cmds.xform(cam_xform, query=True, worldSpace=True, translation=True)
-            rotation = cmds.xform(cam_xform, query=True, worldSpace=True, rotation=True)
-            scale = cmds.xform(cam_xform, query=True, worldSpace=True, scale=True)
-            
-            translate_op.Set(Gf.Vec3d(translation[0], translation[1], translation[2]), time_code)
-            rotate_op.Set(Gf.Vec3f(rotation[0], rotation[1], rotation[2]), time_code)
-            scale_op.Set(Gf.Vec3d(scale[0], scale[1], scale[2]), time_code)
-            
-            focal_length = cmds.getAttr(f"{cam_shape}.focalLength")
-            h_aperture = cmds.getAttr(f"{cam_shape}.horizontalFilmAperture")
-            v_aperture = cmds.getAttr(f"{cam_shape}.verticalFilmAperture")
-            h_offset = cmds.getAttr(f"{cam_shape}.horizontalFilmOffset")
-            v_offset = cmds.getAttr(f"{cam_shape}.verticalFilmOffset")
-            near_clip = cmds.getAttr(f"{cam_shape}.nearClipPlane")
-            far_clip = cmds.getAttr(f"{cam_shape}.farClipPlane")
-            
-            usd_camera.GetFocalLengthAttr().Set(float(focal_length), time_code)
-            usd_camera.GetHorizontalApertureAttr().Set(_inches_to_mm(h_aperture), time_code)
-            usd_camera.GetVerticalApertureAttr().Set(_inches_to_mm(v_aperture), time_code)
-            usd_camera.GetHorizontalApertureOffsetAttr().Set(_inches_to_mm(h_offset), time_code)
-            usd_camera.GetVerticalApertureOffsetAttr().Set(_inches_to_mm(v_offset), time_code)
-            usd_camera.GetClippingRangeAttr().Set(Gf.Vec2f(near_clip, far_clip), time_code)
+        # Get transform
+        world_matrix = mc.xform(camera_name, query=True, matrix=True, worldSpace=True)
+        gf_matrix = Gf.Matrix4d(
+            world_matrix[0], world_matrix[1], world_matrix[2], world_matrix[3],
+            world_matrix[4], world_matrix[5], world_matrix[6], world_matrix[7],
+            world_matrix[8], world_matrix[9], world_matrix[10], world_matrix[11],
+            world_matrix[12], world_matrix[13], world_matrix[14], world_matrix[15]
+        )
+        xform_samples[frame] = gf_matrix
         
-        print(f"  Wrote {frame_count} time samples")
-        
-    finally:
-        cmds.currentTime(original_time, edit=True)
+        # Get camera attributes
+        shape = mc.listRelatives(camera_name, shapes=True)[0]
+        attr_samples['focalLength'][frame] = mc.getAttr(f"{shape}.focalLength")
+        attr_samples['horizontalAperture'][frame] = mc.getAttr(f"{shape}.horizontalFilmAperture") * 25.4
+        attr_samples['verticalAperture'][frame] = mc.getAttr(f"{shape}.verticalFilmAperture") * 25.4
+        attr_samples['focusDistance'][frame] = mc.getAttr(f"{shape}.focusDistance")
+        attr_samples['fStop'][frame] = mc.getAttr(f"{shape}.fStop")
     
-    root_layer = stage.GetRootLayer()
-    custom_data = dict(root_layer.customLayerData or {})
-    custom_data["layoutlink_has_animation"] = True
-    custom_data["layoutlink_start_frame"] = int(start_frame)
-    custom_data["layoutlink_end_frame"] = int(end_frame)
-    custom_data["layoutlink_fps"] = fps
-    custom_data["layoutlink_animated_objects"] = 1
-    custom_data["layoutlink_source"] = "maya_camera_export"
-    root_layer.customLayerData = custom_data
+    # Write transform samples
+    xformable = UsdGeom.Xformable(camera_prim)
+    xform_op = xformable.AddTransformOp()
+    for frame, matrix in xform_samples.items():
+        xform_op.Set(matrix, Usd.TimeCode(frame))
+    
+    # Write attribute samples
+    for attr_name, samples in attr_samples.items():
+        attr = camera_prim.GetPrim().GetAttribute(attr_name)
+        for frame, value in samples.items():
+            attr.Set(value, Usd.TimeCode(frame))
     
     stage.Save()
     
-    file_size = os.path.getsize(abs_path)
-    print(f"  File size: {file_size} bytes")
+    # Print metadata info for verification
+    print(f"✓ Exported camera with FPS metadata:")
+    print(f"  - Maya FPS: {maya_fps}")
+    print(f"  - timeCodesPerSecond: {stage.GetTimeCodesPerSecond()}")
+    print(f"  - framesPerSecond: {stage.GetFramesPerSecond()}")
+    print(f"  - Frame range: {start_frame} to {end_frame}")
     
-    if file_size < 1000:
-        om.MGlobal.displayWarning(f"File seems small ({file_size} bytes) - animation may not have exported correctly")
-    
-    om.MGlobal.displayInfo(f"Camera exported to: {abs_path}")
-    
-    return abs_path
+    return output_path
 
-
-# =============================================================================
-# Qt UI
-# =============================================================================
-
-class CameraExportUI(MayaQWidgetDockableMixin, QtWidgets.QWidget):
-    """Professional USD Camera Export UI"""
-    
-    WINDOW_TITLE = "CameraLink - Export Camera"
-    WINDOW_OBJECT = "CameraLinkExportWindow"
+class CameraLinkUI(QtWidgets.QWidget):
+    """Main UI for CameraLink Maya plugin."""
     
     def __init__(self, parent=None):
-        super(CameraExportUI, self).__init__(parent=parent)
-        
-        self.setObjectName(self.WINDOW_OBJECT)
-        self.setWindowTitle(self.WINDOW_TITLE)
-        self.setMinimumWidth(450)
-        
+        super().__init__(parent)
+        self.setObjectName("CameraLinkWidget")
+        self.setWindowTitle("CameraLink - Export Camera")
+        self.selected_camera = None
         self.setup_ui()
+        self.load_timeline_range()
     
     def setup_ui(self):
+        """Create the user interface."""
+        self.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 2px solid #555;
+                border-radius: 5px;
+                margin-top: 10px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+            }
+            QPushButton {
+                padding: 5px;
+                border-radius: 3px;
+            }
+        """)
+        
+        # Main layout
         main_layout = QtWidgets.QVBoxLayout(self)
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(10)
         
-        # Header
-        header = QtWidgets.QLabel("USD Camera Export")
-        header.setStyleSheet("font-size: 14px; font-weight: bold; padding: 8px;")
-        header.setAlignment(QtCore.Qt.AlignCenter)
-        main_layout.addWidget(header)
+        # Title
+        title = QtWidgets.QLabel("📹 CameraLink - Export Camera")
+        title.setAlignment(QtCore.Qt.AlignCenter)
+        title_font = QtGui.QFont()
+        title_font.setPointSize(12)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        main_layout.addWidget(title)
         
-        # ============================================================
-        # CAMERA SELECTION
-        # ============================================================
-        camera_group = QtWidgets.QGroupBox("Camera")
-        camera_layout = QtWidgets.QHBoxLayout()
+        # Camera Selection Group
+        camera_group = QtWidgets.QGroupBox("📷 Camera Selection")
+        camera_layout = QtWidgets.QVBoxLayout()
         
-        self.camera_combo = QtWidgets.QComboBox()
-        self.camera_combo.setMinimumWidth(250)
-        camera_layout.addWidget(self.camera_combo)
+        select_layout = QtWidgets.QHBoxLayout()
+        self.select_camera_btn = QtWidgets.QPushButton("Select Camera")
+        self.select_camera_btn.setStyleSheet("background-color: rgb(179, 138, 188); color: black;")
+        self.select_camera_btn.clicked.connect(self.select_camera)
+        select_layout.addWidget(self.select_camera_btn)
         
-        refresh_btn = QtWidgets.QPushButton("↻ Refresh")
-        refresh_btn.setFixedWidth(80)
-        refresh_btn.clicked.connect(self.populate_cameras)
-        camera_layout.addWidget(refresh_btn)
+        self.camera_label = QtWidgets.QLabel("No camera selected")
+        select_layout.addWidget(self.camera_label)
+        camera_layout.addLayout(select_layout)
         
         camera_group.setLayout(camera_layout)
         main_layout.addWidget(camera_group)
         
-        # ============================================================
-        # OUTPUT FILE
-        # ============================================================
-        output_group = QtWidgets.QGroupBox("Output File")
-        output_layout = QtWidgets.QHBoxLayout()
+        # Frame Range Group
+        range_group = QtWidgets.QGroupBox("🎬 Frame Range")
+        range_layout = QtWidgets.QVBoxLayout()
         
-        self.file_path_input = QtWidgets.QLineEdit()
-        default_path = os.path.join(cmds.workspace(query=True, rootDirectory=True), "camera.usda")
-        self.file_path_input.setText(default_path)
-        output_layout.addWidget(self.file_path_input)
+        # FPS info display
+        fps_label = QtWidgets.QLabel()
+        time_unit = mc.currentUnit(query=True, time=True)
+        fps_label.setText(f"Current Maya FPS: {time_unit}")
+        fps_label.setStyleSheet("color: #888; font-style: italic;")
+        range_layout.addWidget(fps_label)
+        
+        # Start frame
+        start_layout = QtWidgets.QHBoxLayout()
+        start_layout.addWidget(QtWidgets.QLabel("Start Frame:"))
+        self.start_frame = QtWidgets.QSpinBox()
+        self.start_frame.setRange(-999999, 999999)
+        self.start_frame.setValue(1)
+        start_layout.addWidget(self.start_frame)
+        range_layout.addLayout(start_layout)
+        
+        # End frame
+        end_layout = QtWidgets.QHBoxLayout()
+        end_layout.addWidget(QtWidgets.QLabel("End Frame:"))
+        self.end_frame = QtWidgets.QSpinBox()
+        self.end_frame.setRange(-999999, 999999)
+        self.end_frame.setValue(100)
+        end_layout.addWidget(self.end_frame)
+        range_layout.addLayout(end_layout)
+        
+        # Get from timeline button
+        timeline_btn = QtWidgets.QPushButton("⏱️ Get from Timeline")
+        timeline_btn.setStyleSheet("background-color: rgb(179, 138, 188); color: black;")
+        timeline_btn.clicked.connect(self.load_timeline_range)
+        range_layout.addWidget(timeline_btn)
+        
+        range_group.setLayout(range_layout)
+        main_layout.addWidget(range_group)
+        
+        # Output File Group
+        output_group = QtWidgets.QGroupBox("💾 Output File")
+        output_layout = QtWidgets.QVBoxLayout()
+        
+        file_layout = QtWidgets.QHBoxLayout()
+        self.output_path = QtWidgets.QLineEdit()
+        self.output_path.setPlaceholderText("Select output path...")
+        file_layout.addWidget(self.output_path)
         
         browse_btn = QtWidgets.QPushButton("Browse...")
-        browse_btn.setFixedWidth(80)
-        browse_btn.clicked.connect(self.browse_file)
-        output_layout.addWidget(browse_btn)
+        browse_btn.setStyleSheet("background-color: rgb(179, 138, 188); color: black;")
+        browse_btn.clicked.connect(self.browse_output)
+        file_layout.addWidget(browse_btn)
+        output_layout.addLayout(file_layout)
+        
+        # Info label
+        info_label = QtWidgets.QLabel("⚡ Will export as .usda (ASCII) with correct FPS metadata")
+        info_label.setStyleSheet("color: #888; font-size: 9pt;")
+        output_layout.addWidget(info_label)
         
         output_group.setLayout(output_layout)
         main_layout.addWidget(output_group)
         
-        # ============================================================
-        # FRAME RANGE
-        # ============================================================
-        frame_group = QtWidgets.QGroupBox("Frame Range")
-        frame_layout = QtWidgets.QHBoxLayout()
+        # Export Button
+        export_btn = QtWidgets.QPushButton("🚀 Export Camera to USDA")
+        export_btn.setMinimumHeight(40)
+        export_btn.setStyleSheet("background-color: rgb(96, 201, 80); color: black; font-weight: bold;")
+        export_btn.clicked.connect(self.export_camera)
+        main_layout.addWidget(export_btn)
         
-        # Start
-        frame_layout.addWidget(QtWidgets.QLabel("Start:"))
-        self.start_spin = QtWidgets.QSpinBox()
-        self.start_spin.setRange(-100000, 100000)
-        self.start_spin.setMinimumWidth(70)
-        frame_layout.addWidget(self.start_spin)
+        # Status label
+        self.status_label = QtWidgets.QLabel("")
+        self.status_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.status_label.setWordWrap(True)
+        main_layout.addWidget(self.status_label)
         
-        frame_layout.addSpacing(10)
-        
-        # End
-        frame_layout.addWidget(QtWidgets.QLabel("End:"))
-        self.end_spin = QtWidgets.QSpinBox()
-        self.end_spin.setRange(-100000, 100000)
-        self.end_spin.setMinimumWidth(70)
-        frame_layout.addWidget(self.end_spin)
-        
-        frame_layout.addSpacing(10)
-        
-        # Step
-        frame_layout.addWidget(QtWidgets.QLabel("Step:"))
-        self.step_spin = QtWidgets.QSpinBox()
-        self.step_spin.setRange(1, 100)
-        self.step_spin.setValue(1)
-        self.step_spin.setMinimumWidth(50)
-        frame_layout.addWidget(self.step_spin)
-        
-        frame_layout.addSpacing(15)
-        
-        # Get from Timeline button (same row)
-        timeline_btn = QtWidgets.QPushButton("↻ Get from Timeline")
-        timeline_btn.clicked.connect(self.sync_from_timeline)
-        frame_layout.addWidget(timeline_btn)
-        
-        frame_layout.addStretch()
-        
-        frame_group.setLayout(frame_layout)
-        main_layout.addWidget(frame_group)
-        
-        # ============================================================
-        # EXPORT BUTTON
-        # ============================================================
-        main_layout.addSpacing(5)
-        
-        self.export_btn = QtWidgets.QPushButton("📷 Export Camera to USDA")
-        self.export_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                font-size: 14px;
-                font-weight: bold;
-                padding: 14px;
-                border-radius: 6px;
-                border: none;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-            QPushButton:pressed {
-                background-color: #3d8b40;
-            }
-        """)
-        self.export_btn.clicked.connect(self.do_export)
-        main_layout.addWidget(self.export_btn)
-        
+        # Add stretch at bottom
         main_layout.addStretch()
-        
-        # Initialize
-        self.populate_cameras()
-        self.sync_from_timeline()
     
-    # ========================================================================
-    # METHODS
-    # ========================================================================
-    
-    def populate_cameras(self):
-        """Populate camera dropdown with scene cameras."""
-        self.camera_combo.clear()
+    def select_camera(self):
+        """Select camera from scene selection."""
+        selection = mc.ls(selection=True, cameras=False, transforms=True)
         
-        cam_shapes = cmds.ls(type="camera") or []
-        cam_transforms = []
-        
-        for shape in cam_shapes:
-            parents = cmds.listRelatives(shape, parent=True, fullPath=True)
-            if parents:
-                cam_transforms.append(parents[0])
-        
-        # Remove duplicates while preserving order
-        seen = set()
-        unique_cams = []
-        for cam in cam_transforms:
-            if cam not in seen:
-                unique_cams.append(cam)
-                seen.add(cam)
-        
-        if not unique_cams:
-            self.camera_combo.addItem("(no cameras in scene)")
+        if not selection:
+            self.status_label.setText("❌ Please select a camera in the scene")
+            self.status_label.setStyleSheet("color: red;")
             return
         
-        for cam in unique_cams:
-            self.camera_combo.addItem(cam)
+        # Check if selected object has a camera shape
+        shapes = mc.listRelatives(selection[0], shapes=True, type='camera')
+        if not shapes:
+            self.status_label.setText("❌ Selected object is not a camera")
+            self.status_label.setStyleSheet("color: red;")
+            return
         
-        # Try to select currently selected camera
-        selection = cmds.ls(selection=True) or []
-        if selection:
-            sel = selection[0]
-            if cmds.nodeType(sel) == "camera":
-                parents = cmds.listRelatives(sel, parent=True, fullPath=True)
-                if parents:
-                    sel = parents[0]
-            
-            idx = self.camera_combo.findText(sel)
-            if idx >= 0:
-                self.camera_combo.setCurrentIndex(idx)
+        self.selected_camera = selection[0]
+        self.camera_label.setText(f"Camera: {self.selected_camera}")
+        self.status_label.setText("✓ Camera selected")
+        self.status_label.setStyleSheet("color: green;")
+        
+        mc.inViewMessage(amg=f"Camera set: {self.selected_camera}", pos='topCenter', fade=True)
     
-    def browse_file(self):
-        """Open file browser for output path."""
-        result = cmds.fileDialog2(
+    def load_timeline_range(self):
+        """Load frame range from Maya timeline."""
+        start = int(mc.playbackOptions(query=True, minTime=True))
+        end = int(mc.playbackOptions(query=True, maxTime=True))
+        self.start_frame.setValue(start)
+        self.end_frame.setValue(end)
+        
+        mc.inViewMessage(amg=f"Timeline range loaded: {start}-{end}", pos='topCenter', fade=True)
+    
+    def browse_output(self):
+        """Browse for output file location."""
+        file_path = mc.fileDialog2(
             fileMode=0,
             caption="Save Camera USD",
-            fileFilter="USD ASCII (*.usda);;USD (*.usd)",
-            startingDirectory=os.path.dirname(self.file_path_input.text())
+            fileFilter="USD ASCII (*.usda);;All Files (*.*)",
+            dialogStyle=2
         )
-        if result:
-            path = result[0]
-            if not path.lower().endswith((".usda", ".usd")):
-                path += ".usda"
-            self.file_path_input.setText(path)
+        
+        if file_path:
+            self.output_path.setText(file_path[0])
     
-    def sync_from_timeline(self):
-        """Sync frame range from Maya timeline."""
-        start = int(cmds.playbackOptions(query=True, minTime=True))
-        end = int(cmds.playbackOptions(query=True, maxTime=True))
-        self.start_spin.setValue(start)
-        self.end_spin.setValue(end)
-    
-    def do_export(self):
-        """Execute the export."""
+    def export_camera(self):
+        """Export the selected camera to USD."""
+        if not self.selected_camera:
+            self.status_label.setText("❌ Please select a camera first")
+            self.status_label.setStyleSheet("color: red;")
+            return
+        
+        output = self.output_path.text()
+        if not output:
+            self.status_label.setText("❌ Please specify an output path")
+            self.status_label.setStyleSheet("color: red;")
+            return
+        
         try:
-            camera = self.camera_combo.currentText()
-            if camera == "(no cameras in scene)":
-                QtWidgets.QMessageBox.warning(
-                    self, "No Camera",
-                    "No cameras found in scene.\nPlease create a camera first."
-                )
-                return
+            # Export camera
+            frame_range = (self.start_frame.value(), self.end_frame.value())
+            result_path = export_camera_to_usd(self.selected_camera, output, frame_range)
             
-            file_path = self.file_path_input.text()
-            if not file_path:
-                QtWidgets.QMessageBox.warning(
-                    self, "No File Path",
-                    "Please specify an output file path."
-                )
-                return
+            # Success
+            self.status_label.setText(f"✓ Camera exported successfully!\n{result_path}")
+            self.status_label.setStyleSheet("color: green;")
             
-            if not file_path.lower().endswith((".usda", ".usd")):
-                file_path += ".usda"
-            
-            start = self.start_spin.value()
-            end = self.end_spin.value()
-            step = self.step_spin.value()
-            
-            result = export_camera_usda(file_path, start, end, step, camera)
-            
-            # Show toast message on success
-            cmds.inViewMessage(
-                assistMessage=f"<hl>Camera exported!</hl>\n{os.path.basename(result)}",
-                position="topCenter",
-                fade=True,
-                fadeStayTime=1500,
-                fadeOutTime=500
+            mc.inViewMessage(
+                amg=f"Camera exported with FPS metadata: {result_path}",
+                pos='topCenter',
+                fade=True
             )
             
         except Exception as e:
-            om.MGlobal.displayError(str(e))
-            QtWidgets.QMessageBox.critical(
-                self, "Export Failed",
-                f"An error occurred:\n\n{e}"
-            )
-            import traceback
-            traceback.print_exc()
-
-
-# =============================================================================
-# PUBLIC API
-# =============================================================================
+            self.status_label.setText(f"❌ Export failed: {str(e)}")
+            self.status_label.setStyleSheet("color: red;")
+            mc.warning(f"CameraLink export error: {str(e)}")
 
 def show_ui():
-    """Show the Camera Export UI as a dockable window."""
+    """Launch CameraLink UI as a dockable workspace control."""
+    # Delete existing workspace control
+    if mc.workspaceControl("CameraLinkWC", exists=True):
+        mc.deleteUI("CameraLinkWC", control=True)
     
-    workspace_control_name = CameraExportUI.WINDOW_OBJECT + "WorkspaceControl"
-    if cmds.workspaceControl(workspace_control_name, exists=True):
-        cmds.deleteUI(workspace_control_name)
+    # Create dockable workspace control
+    workspace = mc.workspaceControl(
+        "CameraLinkWC",
+        label="CameraLink",
+        dockToMainWindow=("right", 1),
+        initialWidth=400,
+        initialHeight=650,
+        retain=False,
+        widthProperty="preferred"
+    )
     
-    ui = CameraExportUI()
-    ui.show(dockable=True)
+    # Get workspace control's Qt widget pointer
+    workspace_ptr = omui.MQtUtil.findControl(workspace)
+    workspace_widget = wrapInstance(int(workspace_ptr), QtWidgets.QWidget)
+    
+    # Create and add our UI
+    ui = CameraLinkUI(parent=workspace_widget)
+    workspace_widget.layout().addWidget(ui)
     
     return ui
 
-
-# Backwards compatibility alias
-def export_camera_ui():
-    """Alias for show_ui() for backwards compatibility."""
-    return show_ui()
-
-
-# =============================================================================
-# AUTO-LAUNCH
-# =============================================================================
-
-if __name__ == "__main__":
-    show_ui()
+# Launch the UI
+show_ui()

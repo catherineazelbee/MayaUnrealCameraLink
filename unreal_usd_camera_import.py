@@ -1,26 +1,30 @@
+
 """
 Unreal USD Camera Importer
 Imports a USD camera with animation into Unreal Engine and creates a Level Sequence.
+
+USAGE
+-----
+1) Place this file in your project's Content/Python folder (or plugin's Content/Python)
+2) In Unreal's Python console:
+       import unreal_usd_camera_import
+       unreal_usd_camera_import.import_camera(r"C:/path/to/camera.usda")
 """
 
 import os
 import unreal
 
+
 def import_camera(file_path: str):
     """
     Import USD camera with animation into Unreal.
-    
-    Args:
-        file_path: Path to the .usda file to import
-        
-    This uses the UsdStageActor approach which streams USD data
-    and can generate a LevelSequence from animated timeSamples.
+    Creates a UsdStageActor AND a saved Level Sequence asset.
     """
     if not file_path:
         unreal.log_error("[USD Import] No file path provided!")
         return None
     
-    # Normalize path with forward slashes
+    # Normalize path
     file_path = file_path.replace("\\", "/")
     abs_file_path = os.path.abspath(file_path)
     
@@ -32,40 +36,57 @@ def import_camera(file_path: str):
     unreal.log("[USD Import] Starting camera import")
     unreal.log(f"[USD Import] File: {abs_file_path}")
     
-    # Get file size to verify it has animation data
-    file_size = os.path.getsize(abs_file_path)
-    unreal.log(f"[USD Import] File size: {file_size} bytes")
-    if file_size < 1000:
-        unreal.log_warning("[USD Import] File seems small - may not contain animation data")
-    
-    # Read USD metadata first
+    # Read USD metadata
     metadata = _read_usd_metadata(abs_file_path)
     
-    # Import via stage actor (matching your working plugin)
-    result = _import_via_stage_actor(abs_file_path, metadata)
+    # Get base name for assets
+    base_name = os.path.splitext(os.path.basename(file_path))[0]
     
-    if result and result.get("success"):
-        unreal.log("=" * 60)
-        unreal.log("[USD Import] SUCCESS - Camera imported")
-        if result.get("has_animation"):
-            unreal.log(f"[USD Import] Animation: frames {metadata.get('start_frame', '?')}-{metadata.get('end_frame', '?')} @ {metadata.get('fps', '?')}fps")
-            unreal.log("[USD Import] → Press PLAY in Sequencer to see animation")
-        unreal.log("=" * 60)
+    # Import via stage actor
+    stage_actor = _create_stage_actor(abs_file_path, base_name)
     
-    return result
+    if not stage_actor:
+        unreal.log_error("[USD Import] Failed to create stage actor")
+        return None
+    
+    # ALWAYS create and save a Level Sequence
+    level_sequence = _create_and_save_level_sequence(stage_actor, base_name, metadata)
+    
+    if level_sequence:
+        # Open in Sequencer
+        unreal.LevelSequenceEditorBlueprintLibrary.open_level_sequence(level_sequence)
+        
+        unreal.log("=" * 60)
+        unreal.log("[USD Import] SUCCESS!")
+        unreal.log(f"[USD Import] Stage Actor: {stage_actor.get_actor_label()}")
+        unreal.log(f"[USD Import] Level Sequence: /Game/Cinematics/LS_{base_name}")
+        unreal.log(f"[USD Import] Animation: frames {metadata.get('start_frame')}-{metadata.get('end_frame')} @ {metadata.get('fps')}fps")
+        unreal.log("[USD Import] → Sequence saved to Content/Cinematics/")
+        unreal.log("[USD Import] → You can now add this as a Subsequence in other sequences!")
+        unreal.log("=" * 60)
+        
+        return {
+            "success": True,
+            "stage_actor": stage_actor,
+            "level_sequence": level_sequence,
+            "sequence_path": f"/Game/Cinematics/LS_{base_name}"
+        }
+    else:
+        unreal.log_warning("[USD Import] Stage actor created but Level Sequence failed")
+        return {
+            "success": True,
+            "stage_actor": stage_actor,
+            "level_sequence": None
+        }
 
 
 def _read_usd_metadata(file_path: str):
-    """
-    Read animation metadata from USD file.
-    Returns dict with has_animation, start_frame, end_frame, fps.
-    """
+    """Read animation metadata from USD file."""
     metadata = {
         "has_animation": False,
         "start_frame": 1,
-        "end_frame": 120,
+        "end_frame": 100,
         "fps": 24,
-        "animated_count": 0
     }
     
     try:
@@ -73,13 +94,12 @@ def _read_usd_metadata(file_path: str):
         
         stage = Usd.Stage.Open(file_path)
         if not stage:
-            unreal.log_warning("[USD Import] Could not open stage for metadata")
             return metadata
         
         # Get timing from stage
         metadata["fps"] = stage.GetTimeCodesPerSecond() or 24
         metadata["start_frame"] = stage.GetStartTimeCode() or 1
-        metadata["end_frame"] = stage.GetEndTimeCode() or 120
+        metadata["end_frame"] = stage.GetEndTimeCode() or 100
         
         # Check for custom metadata
         root_layer = stage.GetRootLayer()
@@ -90,9 +110,8 @@ def _read_usd_metadata(file_path: str):
             metadata["start_frame"] = custom_data.get("layoutlink_start_frame", metadata["start_frame"])
             metadata["end_frame"] = custom_data.get("layoutlink_end_frame", metadata["end_frame"])
             metadata["fps"] = custom_data.get("layoutlink_fps", metadata["fps"])
-            metadata["animated_count"] = custom_data.get("layoutlink_animated_objects", 0)
         
-        # Also check for time samples on prims (in case metadata wasn't written)
+        # Check for time samples
         for prim in stage.Traverse():
             if prim.IsA(UsdGeom.Xformable):
                 xformable = UsdGeom.Xformable(prim)
@@ -104,8 +123,7 @@ def _read_usd_metadata(file_path: str):
                         metadata["end_frame"] = max(metadata["end_frame"], max(times))
                         break
         
-        unreal.log(f"[USD Import] Metadata: animation={metadata['has_animation']}, "
-                   f"frames={metadata['start_frame']}-{metadata['end_frame']}, fps={metadata['fps']}")
+        unreal.log(f"[USD Import] Metadata: frames {metadata['start_frame']}-{metadata['end_frame']}, fps={metadata['fps']}")
         
     except ImportError:
         unreal.log_warning("[USD Import] pxr module not available - using defaults")
@@ -115,111 +133,148 @@ def _read_usd_metadata(file_path: str):
     return metadata
 
 
-def _import_via_stage_actor(file_path: str, metadata: dict):
-    """
-    Import USD via UsdStageActor - matching your working LayoutLink pattern.
-    """
+def _create_stage_actor(file_path: str, base_name: str):
+    """Create and configure the UsdStageActor."""
     try:
-        # Get world
+        # Get editor world
         editor = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)
         world = editor.get_editor_world()
         
         if not world:
-            unreal.log_error("[USD Import] No editor world available")
+            unreal.log_error("[USD Import] No editor world")
             return None
         
         # Spawn stage actor
-        location = unreal.Vector(0, 0, 0)
-        rotation = unreal.Rotator(0, 0, 0)
-        
         stage_actor = unreal.EditorLevelLibrary.spawn_actor_from_class(
             unreal.UsdStageActor.static_class(),
-            location,
-            rotation
+            unreal.Vector(0, 0, 0),
+            unreal.Rotator(0, 0, 0)
         )
         
         if not stage_actor:
-            unreal.log_error("[USD Import] Failed to spawn UsdStageActor")
             return None
         
-        unreal.log(f"[USD Import] Spawned UsdStageActor: {stage_actor.get_name()}")
-        
-        # Set descriptive label
-        base_name = os.path.splitext(os.path.basename(file_path))[0]
-        stage_actor.set_actor_label(f"USD_Camera_{base_name}")
-        
-        # Set the root layer (matching your working plugin's exact pattern)
+        # Configure
+        stage_actor.set_actor_label(f"USD_Cam_{base_name}")
         stage_actor.set_editor_property("root_layer", {"file_path": file_path})
         stage_actor.set_editor_property("time", 0.0)
         
-        unreal.log("[USD Import] Root layer set successfully")
+        unreal.log(f"[USD Import] Created UsdStageActor: {stage_actor.get_actor_label()}")
         
-        # Setup Level Sequence for animation
-        level_sequence = None
-        has_animation = metadata.get("has_animation", False)
-        
-        if has_animation:
-            unreal.log("[USD Import] Setting up animation...")
-            
-            # Get the Level Sequence that USD Stage Actor automatically creates
-            level_sequence = stage_actor.get_editor_property("level_sequence")
-            
-            if level_sequence:
-                unreal.log(f"[USD Import] Found Level Sequence: {level_sequence.get_name()}")
-                
-                # Configure timing
-                fps = int(metadata.get("fps", 24))
-                start_frame = int(metadata.get("start_frame", 1))
-                end_frame = int(metadata.get("end_frame", 120))
-                
-                frame_rate = unreal.FrameRate(numerator=fps, denominator=1)
-                level_sequence.set_display_rate(frame_rate)
-                level_sequence.set_tick_resolution(frame_rate)
-                
-                level_sequence.set_playback_start(start_frame)
-                level_sequence.set_playback_end(end_frame)
-                
-                # Set view range with padding
-                level_sequence.set_view_range_start(float(start_frame - 10))
-                level_sequence.set_view_range_end(float(end_frame + 10))
-                
-                unreal.log(f"[USD Import] Configured sequence: {start_frame}-{end_frame} @ {fps}fps")
-                
-                # Open in Sequencer
-                unreal.LevelSequenceEditorBlueprintLibrary.open_level_sequence(level_sequence)
-                unreal.log("[USD Import] Opened Level Sequence in Sequencer")
-                
-            else:
-                unreal.log_warning("[USD Import] Animation detected but no Level Sequence found!")
-                unreal.log_warning("[USD Import] Animation data is in USD but may not play automatically")
-        else:
-            unreal.log("[USD Import] No animation detected - imported as static camera")
-        
-        return {
-            "success": True,
-            "stage_actor": stage_actor,
-            "level_sequence": level_sequence,
-            "has_animation": has_animation
-        }
+        return stage_actor
         
     except Exception as e:
-        unreal.log_error(f"[USD Import] Import failed: {e}")
+        unreal.log_error(f"[USD Import] Stage actor creation failed: {e}")
+        return None
+
+
+def _create_and_save_level_sequence(stage_actor, base_name: str, metadata: dict):
+    """
+    Create a Level Sequence that drives the UsdStageActor's Time property.
+    This sequence is SAVED to Content/Cinematics/ so it can be used as a Subsequence.
+    """
+    try:
+        start_frame = int(metadata.get("start_frame", 1))
+        end_frame = int(metadata.get("end_frame", 100))
+        fps = int(metadata.get("fps", 24))
+        
+        # Asset path
+        sequence_path = "/Game/Cinematics"
+        sequence_name = f"LS_{base_name}"
+        full_asset_path = f"{sequence_path}/{sequence_name}"
+        
+        # Ensure directory exists
+        if not unreal.EditorAssetLibrary.does_directory_exist(sequence_path):
+            unreal.EditorAssetLibrary.make_directory(sequence_path)
+            unreal.log(f"[USD Import] Created directory: {sequence_path}")
+        
+        # Delete existing sequence with same name
+        if unreal.EditorAssetLibrary.does_asset_exist(full_asset_path):
+            unreal.EditorAssetLibrary.delete_asset(full_asset_path)
+            unreal.log(f"[USD Import] Replaced existing sequence: {full_asset_path}")
+        
+        # Create Level Sequence
+        asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
+        level_sequence = asset_tools.create_asset(
+            sequence_name,
+            sequence_path,
+            unreal.LevelSequence,
+            unreal.LevelSequenceFactoryNew()
+        )
+        
+        if not level_sequence:
+            unreal.log_error("[USD Import] Failed to create Level Sequence asset")
+            return None
+        
+        unreal.log(f"[USD Import] Created Level Sequence: {full_asset_path}")
+        
+        # Configure timing
+        frame_rate = unreal.FrameRate(fps, 1)
+        level_sequence.set_display_rate(frame_rate)
+        level_sequence.set_playback_start(start_frame)
+        level_sequence.set_playback_end(end_frame)
+        level_sequence.set_view_range_start(float(start_frame - 10))
+        level_sequence.set_view_range_end(float(end_frame + 10))
+        
+        # Bind the stage actor
+        binding = level_sequence.add_possessable(stage_actor)
+        
+        if binding:
+            unreal.log("[USD Import] Bound stage actor to sequence")
+            
+            # Add Time track to drive USD animation
+            movie_scene = level_sequence.get_movie_scene()
+            binding_id = binding.get_id()
+            
+            try:
+                # Create float track for Time property
+                time_track = movie_scene.add_track(unreal.MovieSceneFloatTrack, binding_id)
+                
+                if time_track:
+                    time_track.set_property_name_and_path("Time", "Time")
+                    
+                    # Add section
+                    time_section = time_track.add_section()
+                    time_section.set_start_frame(start_frame)
+                    time_section.set_end_frame(end_frame)
+                    
+                    # Try to add keyframes for Time property
+                    # Start frame: Time = start_frame, End frame: Time = end_frame
+                    try:
+                        channels = time_section.get_all_channels()
+                        if channels:
+                            float_channel = channels[0]
+                            
+                            # Add keyframes
+                            time_start = unreal.FrameNumber(start_frame)
+                            time_end = unreal.FrameNumber(end_frame)
+                            
+                            float_channel.add_key(time_start, float(start_frame), 0.0)
+                            float_channel.add_key(time_end, float(end_frame), 0.0)
+                            
+                            unreal.log(f"[USD Import] Added Time keyframes: {start_frame} -> {end_frame}")
+                    except Exception as e:
+                        unreal.log_warning(f"[USD Import] Could not add keyframes automatically: {e}")
+                        unreal.log("[USD Import] Please manually keyframe Time: frame 1 = 1.0, last frame = end value")
+                    
+            except Exception as e:
+                unreal.log_warning(f"[USD Import] Could not add Time track: {e}")
+        
+        # IMPORTANT: Save the sequence asset!
+        unreal.EditorAssetLibrary.save_asset(full_asset_path)
+        unreal.log(f"[USD Import] Saved Level Sequence to: {full_asset_path}")
+        
+        return level_sequence
+        
+    except Exception as e:
+        unreal.log_error(f"[USD Import] Level Sequence creation failed: {e}")
         import traceback
         unreal.log(traceback.format_exc())
-        return {"success": False, "error": str(e)}
-
-
-
+        return None
 
 
 def print_usd_debug(file_path: str):
-    """
-    Debug helper: Print USD file structure info.
-    Call this to verify your USD file has animation data.
-    
-    Args:
-        file_path: Path to the .usda file to inspect
-    """
+    """Debug helper: Print USD file structure info."""
     if not file_path:
         unreal.log_error("[USD Debug] No file path provided!")
         return
@@ -240,39 +295,18 @@ def print_usd_debug(file_path: str):
         unreal.log(f"  StartTimeCode: {stage.GetStartTimeCode()}")
         unreal.log(f"  EndTimeCode: {stage.GetEndTimeCode()}")
         
-        root_layer = stage.GetRootLayer()
-        custom_data = root_layer.customLayerData or {}
-        if custom_data:
-            unreal.log(f"  Custom metadata: {custom_data}")
-        
-        unreal.log("")
         unreal.log("  Prims:")
         for prim in stage.Traverse():
-            unreal.log(f"    {prim.GetPath()} (type: {prim.GetTypeName()})")
+            unreal.log(f"    {prim.GetPath()} ({prim.GetTypeName()})")
             
             if prim.IsA(UsdGeom.Xformable):
                 xformable = UsdGeom.Xformable(prim)
                 for op in xformable.GetOrderedXformOps():
                     times = op.GetTimeSamples()
                     if times:
-                        unreal.log(f"      Transform op '{op.GetOpName()}': {len(times)} time samples")
-                        if len(times) <= 5:
-                            unreal.log(f"        Frames: {times}")
-                        else:
-                            unreal.log(f"        Frames: {times[0]} ... {times[-1]}")
-            
-            if prim.IsA(UsdGeom.Camera):
-                camera = UsdGeom.Camera(prim)
-                focal_attr = camera.GetFocalLengthAttr()
-                times = focal_attr.GetTimeSamples()
-                if times:
-                    unreal.log(f"      FocalLength: {len(times)} time samples")
+                        unreal.log(f"      {op.GetOpName()}: {len(times)} samples")
         
         unreal.log("=" * 60)
         
-    except ImportError:
-        unreal.log_error("[USD Debug] pxr module not available")
     except Exception as e:
         unreal.log_error(f"[USD Debug] Error: {e}")
-        import traceback
-        unreal.log(traceback.format_exc())
