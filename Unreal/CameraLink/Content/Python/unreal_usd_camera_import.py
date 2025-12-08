@@ -120,7 +120,7 @@ def _read_usd_metadata(file_path: str):
 
 def _import_via_stage_actor(file_path: str, metadata: dict):
     """
-    Import USD via UsdStageActor.
+    Import USD via UsdStageActor - reuses existing actor if found.
     """
     try:
         # Get world
@@ -131,27 +131,41 @@ def _import_via_stage_actor(file_path: str, metadata: dict):
             unreal.log_error("[CameraLink] No editor world available")
             return None
         
-        # Spawn stage actor
-        location = unreal.Vector(0, 0, 0)
-        rotation = unreal.Rotator(0, 0, 0)
-        
-        stage_actor = unreal.EditorLevelLibrary.spawn_actor_from_class(
-            unreal.UsdStageActor.static_class(),
-            location,
-            rotation
-        )
-        
-        if not stage_actor:
-            unreal.log_error("[CameraLink] Failed to spawn UsdStageActor")
-            return None
-        
-        unreal.log(f"[CameraLink] Spawned UsdStageActor: {stage_actor.get_name()}")
-        
-        # Set descriptive label
+        # Check if stage actor for this file already exists
         base_name = os.path.splitext(os.path.basename(file_path))[0]
-        stage_actor.set_actor_label(f"USD_Camera_{base_name}")
+        expected_label = f"USD_Camera_{base_name}"
         
-        # Set the root layer
+        existing_actor = None
+        for actor in unreal.EditorLevelLibrary.get_all_level_actors():
+            if actor.get_class() == unreal.UsdStageActor.static_class():
+                if actor.get_actor_label() == expected_label:
+                    existing_actor = actor
+                    unreal.log(f"[CameraLink] Found existing stage actor: {existing_actor.get_name()}")
+                    break
+        
+        if existing_actor:
+            # Reuse existing actor - just update the root layer to trigger reload
+            stage_actor = existing_actor
+            unreal.log("[CameraLink] Reloading existing stage actor...")
+        else:
+            # Spawn new stage actor
+            location = unreal.Vector(0, 0, 0)
+            rotation = unreal.Rotator(0, 0, 0)
+            
+            stage_actor = unreal.EditorLevelLibrary.spawn_actor_from_class(
+                unreal.UsdStageActor.static_class(),
+                location,
+                rotation
+            )
+            
+            if not stage_actor:
+                unreal.log_error("[CameraLink] Failed to spawn UsdStageActor")
+                return None
+            
+            stage_actor.set_actor_label(expected_label)
+            unreal.log(f"[CameraLink] Spawned NEW UsdStageActor: {stage_actor.get_name()}")
+        
+        # Set the root layer (this triggers reload for existing actors)
         stage_actor.set_editor_property("root_layer", {"file_path": file_path})
         stage_actor.set_editor_property("time", 1.0)  # Start at frame 1
         
