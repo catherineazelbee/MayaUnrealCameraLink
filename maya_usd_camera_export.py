@@ -114,9 +114,10 @@ def export_camera_to_usd(camera_name, output_path, frame_range):
         for frame, value in samples.items():
             attr.Set(value, frame)
     
-    # Add metadata to root layer (like LayoutLink does)
+    # Add metadata to root layer (CameraLink metadata keys)
     root_layer = stage.GetRootLayer()
     custom_data = {
+        'cameralink_has_animation': True,
         'cameralink_start_frame': start_frame,
         'cameralink_end_frame': end_frame,
         'cameralink_fps': maya_fps,

@@ -54,6 +54,10 @@ def import_camera(file_path: str):
         if result.get("has_animation"):
             unreal.log(f"[CameraLink] Animation: frames {metadata.get('start_frame', '?')}-{metadata.get('end_frame', '?')} @ {metadata.get('fps', '?')}fps")
             unreal.log("[CameraLink] → Press PLAY in Sequencer to see animation")
+        unreal.log("")
+        unreal.log("[CameraLink] To update existing actors:")
+        unreal.log("[CameraLink]   1. Export updated camera from Maya")
+        unreal.log("[CameraLink]   2. In Unreal, click 'Reload Stage' in USD Stage Editor")
         unreal.log("=" * 60)
     
     return result
@@ -120,7 +124,8 @@ def _read_usd_metadata(file_path: str):
 
 def _import_via_stage_actor(file_path: str, metadata: dict):
     """
-    Import USD via UsdStageActor - reuses existing actor if found.
+    Import USD via UsdStageActor - ALWAYS creates new actor (like LayoutLink).
+    User manually reloads existing actors via USD Stage Editor.
     """
     try:
         # Get world
@@ -131,43 +136,37 @@ def _import_via_stage_actor(file_path: str, metadata: dict):
             unreal.log_error("[CameraLink] No editor world available")
             return None
         
-        # Check if stage actor for this file already exists
+        # ALWAYS spawn new stage actor (like LayoutLink does)
+        location = unreal.Vector(0, 0, 0)
+        rotation = unreal.Rotator(0, 0, 0)
+        
+        stage_actor = unreal.EditorLevelLibrary.spawn_actor_from_class(
+            unreal.UsdStageActor.static_class(),
+            location,
+            rotation
+        )
+        
+        if not stage_actor:
+            unreal.log_error("[CameraLink] Failed to spawn UsdStageActor")
+            return None
+        
+        # Set descriptive label (like LayoutLink uses "MayaLayoutImport")
         base_name = os.path.splitext(os.path.basename(file_path))[0]
-        expected_label = f"USD_Camera_{base_name}"
+        stage_actor.set_actor_label(f"CameraLink_{base_name}")
+        unreal.log(f"[CameraLink] Spawned UsdStageActor: {stage_actor.get_name()}")
         
-        existing_actor = None
-        for actor in unreal.EditorLevelLibrary.get_all_level_actors():
-            if actor.get_class() == unreal.UsdStageActor.static_class():
-                if actor.get_actor_label() == expected_label:
-                    existing_actor = actor
-                    unreal.log(f"[CameraLink] Found existing stage actor: {existing_actor.get_name()}")
-                    break
-        
-        if existing_actor:
-            # Reuse existing actor - just update the root layer to trigger reload
-            stage_actor = existing_actor
-            unreal.log("[CameraLink] Reloading existing stage actor...")
-        else:
-            # Spawn new stage actor
-            location = unreal.Vector(0, 0, 0)
-            rotation = unreal.Rotator(0, 0, 0)
-            
-            stage_actor = unreal.EditorLevelLibrary.spawn_actor_from_class(
-                unreal.UsdStageActor.static_class(),
-                location,
-                rotation
-            )
-            
-            if not stage_actor:
-                unreal.log_error("[CameraLink] Failed to spawn UsdStageActor")
-                return None
-            
-            stage_actor.set_actor_label(expected_label)
-            unreal.log(f"[CameraLink] Spawned NEW UsdStageActor: {stage_actor.get_name()}")
-        
-        # Set the root layer (this triggers reload for existing actors)
+        # Set the root layer
         stage_actor.set_editor_property("root_layer", {"file_path": file_path})
-        stage_actor.set_editor_property("time", 1.0)  # Start at frame 1
+        stage_actor.set_editor_property("time", 1.0)
+        
+        # CRITICAL: Set time range on the STAGE ACTOR (not just the sequence)
+        # This makes reload work correctly - Unreal uses these to configure the sequence
+        if metadata.get("has_animation"):
+            start_frame = float(metadata.get("start_frame", 1))
+            end_frame = float(metadata.get("end_frame", 120))
+            stage_actor.set_editor_property("StartTimeCode", start_frame)
+            stage_actor.set_editor_property("EndTimeCode", end_frame)
+            unreal.log(f"[CameraLink] Set stage actor time range: {start_frame}-{end_frame}")
         
         unreal.log("[CameraLink] Root layer set successfully")
         
