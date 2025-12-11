@@ -94,14 +94,16 @@ def export_camera_to_usd(camera_name, output_path, frame_range):
         shape = mc.listRelatives(camera_name, shapes=True)[0]
         attr_samples['focalLength'][frame] = mc.getAttr(f"{shape}.focalLength")
         
-        # Get Maya's film aperture in inches, convert to mm
+        # Get Maya's film aperture values for reference
         maya_h_aperture = mc.getAttr(f"{shape}.horizontalFilmAperture") * 25.4
         maya_v_aperture = mc.getAttr(f"{shape}.verticalFilmAperture") * 25.4
         
-        # Calculate aperture based on render resolution aspect ratio
-        # Keep horizontal aperture, adjust vertical to match render aspect
-        h_aperture = maya_h_aperture
-        v_aperture = h_aperture / target_aspect
+        # For matching FOV between Maya and Unreal:
+        # Use standard 36mm horizontal aperture (full-frame 35mm standard)
+        # Derive vertical aperture from render resolution aspect ratio
+        # This ensures consistent FOV match regardless of Maya's filmback settings
+        h_aperture = 36.0  # Standard full-frame horizontal aperture in mm
+        v_aperture = h_aperture / target_aspect  # Derive from render aspect
         
         attr_samples['horizontalAperture'][frame] = h_aperture
         attr_samples['verticalAperture'][frame] = v_aperture
@@ -157,9 +159,9 @@ def export_camera_to_usd(camera_name, output_path, frame_range):
     print(f"  - Frame range: {start_frame} to {end_frame}")
     print(f"  - Maya FPS: {maya_fps}")
     print(f"  - Maya linear unit: {linear_unit} (scale to cm: {cm_scale})")
-    print(f"  - Transform type: Separate TRS (matches LayoutLink)")
-    print(f"  - Aperture: {h_aperture:.2f}mm x {v_aperture:.2f}mm (aspect: {h_aperture/v_aperture:.4f})")
-    print(f"  - Target aspect: {target_aspect:.4f} ({render_width}x{render_height})")
+    print(f"  - Maya aperture: {maya_h_aperture:.2f}mm x {maya_v_aperture:.2f}mm")
+    print(f"  - Export aperture: {h_aperture:.2f}mm x {v_aperture:.2f}mm (16:9 adjusted)")
+    print(f"  - Render resolution: {render_width}x{render_height}")
     
     return output_path
 
