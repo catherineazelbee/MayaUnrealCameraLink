@@ -46,9 +46,15 @@ def export_camera_to_usd(camera_name, output_path, frame_range):
     # Create USD stage in ASCII format
     stage = Usd.Stage.CreateNew(output_path)
     
-    # Set scene metadata (MATCH LAYOUTLINK)
+    # Set scene metadata AND timing metadata (CRITICAL for Unreal!)
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
     UsdGeom.SetStageMetersPerUnit(stage, 0.01)
+    
+    # Set FPS metadata so Unreal interprets time correctly
+    stage.SetTimeCodesPerSecond(maya_fps)
+    stage.SetFramesPerSecond(maya_fps)
+    stage.SetStartTimeCode(start_frame)
+    stage.SetEndTimeCode(end_frame)
     
     # Create camera prim
     camera_path = f"/cameras/{camera_name}"
