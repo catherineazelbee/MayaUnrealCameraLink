@@ -22,6 +22,11 @@ def export_camera_to_usd(camera_name, output_path, frame_range):
     # Get Maya's current frame rate
     maya_fps = mel.eval('currentTimeUnitToFPS()')
     
+    # Get Maya's linear unit for focus distance conversion to cm
+    linear_unit = mc.currentUnit(query=True, linear=True)
+    unit_to_cm = {'mm': 0.1, 'cm': 1.0, 'm': 100.0, 'in': 2.54, 'ft': 30.48, 'yd': 91.44}
+    cm_scale = unit_to_cm.get(linear_unit, 1.0)
+    
     # Ensure .usda extension (ASCII format)
     if not output_path.endswith('.usda'):
         output_path = output_path.rsplit('.', 1)[0] + '.usda'
@@ -107,7 +112,7 @@ def export_camera_to_usd(camera_name, output_path, frame_range):
         attr_samples['horizontalApertureOffset'][frame] = mc.getAttr(f"{shape}.horizontalFilmOffset") * 25.4
         attr_samples['verticalApertureOffset'][frame] = mc.getAttr(f"{shape}.verticalFilmOffset") * 25.4
         
-        attr_samples['focusDistance'][frame] = mc.getAttr(f"{shape}.focusDistance")
+        attr_samples['focusDistance'][frame] = mc.getAttr(f"{shape}.focusDistance") * cm_scale
         attr_samples['fStop'][frame] = mc.getAttr(f"{shape}.fStop")
     
     # Write SEPARATE transform ops (MATCH LAYOUTLINK EXACTLY)
@@ -159,6 +164,7 @@ def export_camera_to_usd(camera_name, output_path, frame_range):
     print(f"  - Transform type: Separate TRS (matches LayoutLink)")
     print(f"  - Aperture: {h_aperture:.2f}mm x {v_aperture:.2f}mm (aspect: {h_aperture/v_aperture:.4f})")
     print(f"  - Target aspect: {target_aspect:.4f} ({render_width}x{render_height})")
+    print(f"  - Maya linear unit: {linear_unit} (scale to cm: {cm_scale})")
     
     return output_path
 
