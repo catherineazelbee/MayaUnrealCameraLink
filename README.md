@@ -6,11 +6,13 @@ A streamlined pipeline for transferring animated cameras from Maya to Unreal Eng
 
 ## Features
 
-- Export Maya cameras with full animation to `.usda` format
+- Export Maya cameras with full animation to .usda format
 - One-click import into Unreal via toolbar button
 - Import creates a Level Sequence with animated CineCameraActor
 - Live reload support for iterative workflows
-- Preserves transform animation, focal length, aperture, and clipping planes
+- Preserves transform animation, focal length, aperture, focus distance, and f-stop
+- Automatic aspect ratio matching from Maya render settings (e.g., 1920×1080 → 16:9)
+- Proper unit conversion for focus distance based on Maya scene units
 
 ---
 
@@ -19,12 +21,13 @@ A streamlined pipeline for transferring animated cameras from Maya to Unreal Eng
 ### Maya
 - Maya 2025.3+ (tested on 2025.3 and 2026)
 - USD Python bindings (`pxr`) available inside Maya
-- Access to `maya.cmds` and `maya.api.OpenMaya`
+- PySide6 (included with Maya 2024+)
 
 ### Unreal Engine
 - Unreal Engine 5.3+
 - Enabled plugins:
   - **USD Importer**
+  - **USD Core**
   - **Python Editor Script Plugin**
   - **Editor Scripting Utilities**
 
@@ -56,26 +59,23 @@ A streamlined pipeline for transferring animated cameras from Maya to Unreal Eng
 
 1. Open Maya and load your scene with an animated camera.
 
-2. In the Script Editor (Python tab), run:
-   ```python
-   import maya_usd_camera_export
-   maya_usd_camera_export.export_camera_ui()
-   ```
+2. Open 'maya_usd_camera_export.py' in Maya's Script Editor (Python tab) and press **Ctrl + Enter** to run the entire script. The CameraLink panel will dock to the right side of Maya (can be moved if desired)
 
-3. In the export UI:
-   - Select your **camera** from the dropdown
-   - Choose a **.usda output path** (e.g., `C:/Projects/camera.usda`)
-   - Set the **frame range** (defaults to timeline range)
-   - Click **Export Camera to USDA**
+3. In the CameraLink UI:
+- Select your camera in the viewport, then click Select Camera
+- Set the frame range (or click "Get from Timeline")
+- Choose a .usda output path via Browse
+- Click Export Camera to USDA
 
-4. You'll see a confirmation message with the file path.
+4. You'll see a confirmation message with export details.
 
 **What gets exported:**
 - Camera transform animation (translate, rotate, scale) per frame
 - Focal length (with animation if keyed)
-- Film aperture (horizontal/vertical) converted from inches to mm
-- Clipping planes (near/far)
-- Custom metadata for Unreal import
+- Film aperture adjusted to match Maya render resolution aspect ratio
+- Focus distance (converted from Maya scene units to cm)
+- F-stop / aperture
+- Custom metadata for Unreal import (FPS, frame range, resolution)
 
 ---
 
@@ -83,37 +83,41 @@ A streamlined pipeline for transferring animated cameras from Maya to Unreal Eng
 
 1. Click the **CameraLink** button in the toolbar (camera icon)
 
-2. A file browser opens — select your `.usda` camera file
+2. In the file browser, select your `.usda` camera file you exported from Maya
 
 3. The camera imports and the Level Sequence opens in Sequencer automatically
 
 **What gets created:**
 - A `UsdStageActor` that references your USD file
-- A Level Sequence with the animated camera
+- A transient Level Sequence with the animated camera
 - Proper frame range and FPS settings
 
 ---
 
-## Updating Camera Animation (Live Reload)
+## Using the Imported Camera
 
-One of the best features of this USD workflow is **live reloading**. You don't need to re-import when you make changes in Maya.
+### Option A: Render with USD Camera (Live-Linked)
 
-### To update your camera animation:
+Best for iterative workflows where you're still adjusting the camera in Maya.
 
-1. **In Maya:** Make your animation changes and re-export to the **same file path** with the export button.
+1. Open the imported USD sequence
+2. Add a **Camera Cut track** → set to the imported camera
+3. Add your other animation/subsequences **INTO this sequence**
+4. Render from this sequence
 
-2. **In Unreal:** 
-   - Open the **USD Stage Editor** (Window → USD Stage)
-   - Select your `UsdStageActor` in the level
-   - Click **Reload** (or right-click → Reload Stage)
+**Pros:** Camera updates automatically when you reload the USD stage  
+**Cons:** Sequence is transient; other content must be added to it (not vice versa)
 
-3. Your camera animation updates instantly in Sequencer!
+### Option B: Convert to Native Unreal
 
-### Tips for iterative workflow:
-- Keep Maya and Unreal open side-by-side
-- Always export to the same `.usda` file location
-- Use Reload instead of re-importing to preserve your Unreal scene setup
-- The Level Sequence frame range updates automatically with the new animation
+Best when camera is finalized and you need to use it in existing sequences.
+
+1. Select the `UsdStageActor` in the Outliner
+2. Open **USD Stage Editor** → **Actions** → **Import**
+3. This creates a native `CineCameraActor` and a saved Level Sequence
+
+**Pros:** Can be used in any sequence, fully native Unreal asset  
+**Cons:** Loses live USD link; must re-import for updates
 
 ---
 
@@ -133,11 +137,22 @@ This prints:
 - All prims and their animation data
 - Number of time samples per transform
 
+**What to look for:**
+- **Time samples** should match your frame count (e.g., 350 frames = 350 samples)
+- If you see **1 time sample**, animation didn't export — re-export from Maya
+- **Custom metadata** confirms FPS, frame range, and aspect ratio are correct
+
 ### Common issues:
 
 | Problem | Solution |
 |---------|----------|
-| Working with USD Stage setup | Add the imported camera root as an actor to the main sequence, set the Time to the start and end of your desired frame range|
+| Camera is blurry/wrong DOF | Check Maya camera's Focus Distance attribute (default 5 is usually blurry, try value 100) |
+| Wrong aspect ratio | Verify Maya Render Settings resolution is set correctly before export |
+| Animation timing off | Ensure Maya and Unreal are using the same FPS |
+| No camera animation in Unreal | Use Unreal debugging in Python console (above) |
+| Camera animation not being rendered in Unreal | Ensure the imported camera is set as the CameraCutTrack in Level Sequencer |
+| Sequence won't add to master | USD sequences are transient; use Actions → Import to convert |
+| Project won't build after adding plugin | Ensure all plugin dependencies are downloaded before adding CameraLink |
 
 ---
 
@@ -165,10 +180,11 @@ maya/scripts/
 
 ## Technical Notes
 
-- **Units:** Maya aperture values (inches) are automatically converted to USD standard (millimeters)
+- **Aperture/Aspect Ratio:** Vertical aperture is calculated from horizontal aperture and Maya's render resolution to ensure correct aspect ratio in Unreal
+- **Focus Distance:** Converted from Maya scene units (mm/cm/m/in/ft/yd) to centimeters for USD
+- **Frame Rate:** Retrieved via MEL `currentTimeUnitToFPS()` to support all FPS settings including custom values
 - **Coordinate System:** Maya Y-up is preserved; Unreal handles axis conversion
-- **Frame Rate:** Exported from Maya's current time unit setting
-- **Transform Order:** Uses translate → rotateXYZ → scale (standard USD order)
+- **Transform Order:** Uses translate → rotateXYZ → scale
 
 ---
 
@@ -176,11 +192,15 @@ maya/scripts/
 
 **v2.0** (December 2025)
 - Added CameraLink Unreal plugin with toolbar button
-- Complete rewrite of Maya export using stepped animation sampling
-- Added live reload documentation
-- Simplified Unreal import with automatic Level Sequence detection
+- Complete rewrite of Maya export with professional dockable UI
+- Aspect ratio now derived from Maya render settings (not camera filmback)
+- Focus distance properly converted based on Maya scene units
+- F-stop now transfers correctly
+- FPS detection via MEL for custom frame rate support
+- Added two-workflow documentation (live USD vs native conversion)
+- Warning about reload removing manual sequence edits
 - Added debug utilities for troubleshooting
-- Improved metadata for frame range and FPS
+- Improved error handling and logging
 
 **v1.0** (September 2025)
 - Initial release

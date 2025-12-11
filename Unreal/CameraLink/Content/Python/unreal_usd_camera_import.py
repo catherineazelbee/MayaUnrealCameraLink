@@ -225,7 +225,6 @@ def _import_via_stage_actor(file_path: str, metadata: dict):
                 # Open in Sequencer
                 unreal.LevelSequenceEditorBlueprintLibrary.open_level_sequence(level_sequence)
                 unreal.log(f"[CameraLink] Opened Level Sequence: {level_sequence.get_path_name()}")
-                unreal.log("[CameraLink] NOTE: Sequence is transient - copy to use in master sequence")
                 
             else:
                 unreal.log_warning("[CameraLink] Animation detected but no Level Sequence found!")
@@ -305,6 +304,6 @@ def print_usd_debug(file_path: str):
     except ImportError:
         unreal.log_error("[CameraLink Debug] pxr module not available")
     except Exception as e:
-        unreal.log_error("[CameraLink Debug] Error: {e}")
+        unreal.log_error(f"[CameraLink Debug] Error: {e}")
         import traceback
         unreal.log(traceback.format_exc())
