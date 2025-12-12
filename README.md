@@ -16,12 +16,6 @@ A streamlined pipeline for transferring animated cameras from Maya to Unreal Eng
 
 ---
 
-## Demo Videos
-
-![Demo](CameraLink/DemoVideo.mp4)
-
----
-
 ## Requirements
 
 ### Maya
